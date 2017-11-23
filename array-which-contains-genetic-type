@@ -1,0 +1,42 @@
+0.问题提出：在java7之前，如果定义一个变参方法如下public static<T> Collection<T> doSomething(T... params),
+调用的时候这样调用
+HashMap<String,String> hm1 = new HashMap<>();
+HashMap<String,String> hm2 = new HashMap<>();
+Collection<HashMap<String,String>> reslt = dosomthing(hm1,hm2);
+这样调用的时候，会得到一个警告“未经检查或不安全的操作”。 这个警告让调用该方法的人（假设这个方法是别人提供的）会很困惑，毕竟只是正常的调用而已。
+
+1.分析产生这个问题的原因。
+变参方法其实是所有末尾的参数都会放到一个数组中，作为一个参数，传递给方法。所以上面的调用其实是生成了一个元素类型为HashMap<String,String>的数组作为
+参数，但实际上，java是不允许创建泛型类型作为元素的数组的，比如 HashMap<String,String>[] hashMapArray = new HashMap<>[2]; 这样是不能通过编译的。
+但是这里这种情况比较特殊，毕竟不是我们自己创建的泛型数组而是编译器创建的，所以这个就给个不知所谓的警告。。。
+
+2.再来分析java不能创建泛型数组的原因。
+java泛型是通过类型擦除实现的，比如HashMap<String,String>编译之后，其实是原始类型（raw type）HashMap<Object,Object>，而数组在 创建 的时候，是必须
+知道内部元素的类型，并且每次往数组中添加元素都会做类型检查的。所以如果能创建HashMap<String,String>的数组，那这个数组也应该可以保存
+HashMap<Integer,Integer>而不报错了，这明显是不行的。
+
+其实java language specification里面给出了为什么不可以的原因：
+It is a compile-time error if the component type of the array being initialized is not reifiable.
+（reify是是具体化的意思，reifiable应该是可以具体化的意思吧）
+
+下面是从JLS中复制出来的关于 reifiable types的解释：
+
+Because some type information is erased during compilation, not all types are
+available at run time. Types that are completely available at run time are known
+as reifiable types.
+A type is reifiable if and only if one of the following holds:
+• It refers to a non-generic class or interface type declaration.
+• It is a parameterized type in which all type arguments are unbounded wildcards
+(§4.5.1).
+• It is a raw type (§4.8).
+• It is a primitive type (§4.2).
+• It is an array type (§10.1) whose element type is reifiable.
+• It is a nested type where, for each type T separated by a ".", T itself is reifiable.
+
+
+下面是来自知乎胖胖的回答
+“ 最初在还没有泛型的时候，数组就一直是以“The Special One”的形象出现。那个时候所有容器都还只
+是持有Object。在其他容器都不太关心类型安全的年代，数组就特立独行地坚持类型检查，它的使命就是
+提供一个“类型安全”和效率更高的容器。所以类型检查和长度限制都被写到了字节码的规范里。至于到
+了支持泛型的年代，泛型“泛化”的本质就和数组“精确高效”的主旨根本上是相违背的。而且要改的话
+就要在字节码里动刀了。还是历史包袱的问题。”
