@@ -1,0 +1,287 @@
+原文地址：http://www.cs.umd.edu/~pugh/java/memoryModel/DoubleCheckedLocking.html
+Signed by: David Bacon (IBM Research) Joshua Bloch (Javasoft), Jeff Bogda, Cliff Click (Hotspot JVM project), Paul Haahr, 
+Doug Lea, Tom May, Jan-Willem Maessen, Jeremy Manson, John D. Mitchell (jGuru) Kelvin Nilsen, Bill Pugh, Emin Gun Sirer
+
+双重检查锁是一种被广泛引用和使用的，在多线程环境中实现懒加载（lazy initialization）的一种有效的方法。
+
+不幸的是，在java中实现双重检查锁时，它不能在没有额外的同步（synchronization）的情况下，以平台无关的方式可靠地起作用。当在其他语言中实现时，
+比如C++，取决于处理器的内存模型、编译器执行的乱序（reordering）以及编译器和同步库的交互。因为上述几种在类似C++语言中没有指明，所以不好说哪种
+情况下双重检查锁可以起作用。C++中清楚的内存界限可以用来使其生效，但是这种界限在java中并不可用。
+
+首先为了解释这种想要的行为，考虑如下的代码：
+// Single threaded version
+class Foo { 
+  private Helper helper = null;
+  public Helper getHelper() {
+    if (helper == null) 
+        helper = new Helper();
+    return helper;
+    }
+  // other functions and members...
+  }
+
+如果上述代码是在多线程环境中使用，很多东西可能会出问题。最明显的就是两个甚至多个Helper对象可能被分配（稍后会提出其他的问题）。解决该问题的方法
+是仅仅把getHelper() 方法标记为synchronized：
+
+// Correct multithreaded version
+class Foo { 
+  private Helper helper = null;
+  public synchronized Helper getHelper() {
+    if (helper == null) 
+        helper = new Helper();
+    return helper;
+    }
+  // other functions and members...
+  }
+上面的代码每次调用getHelper()的时候都执行同步。双重检查锁语法尝试在helper对象已经分配了的情况下不再使用同步：
+
+说明一下，下面的代码如果不加内层的判断，可能不同线程同时判断为null，同时准备执行初始化，不加的话每个线程都会依次执行初始化。
+// Broken multithreaded version
+// "Double-Checked Locking" idiom
+class Foo { 
+  private Helper helper = null;
+  public Helper getHelper() {
+    if (helper == null) 
+      synchronized(this) {
+        if (helper == null) 
+          helper = new Helper();
+      }    
+    return helper;
+    }
+  // other functions and members...
+  }
+不幸的是，上述代码不管是在优化的编译器还是共享内存多处理器存在的情况下，都不起作用。
+
+他不起作用啊
+
+有很多原因导致这一做法不起作用。我们要说的一些原因是很显而易见的。在理解了这些之后，你可能会尝试设计一种方法来解决问题，但是你的修正不会起作用的=_=
+有更微妙的原因导致你的修正不起作用。理解了这些原因之后，想出了更好的修正方法，还是不会起作用的。。。。。。因为有更更微秒的原因。
+
+很多聪明人花了很多时间研究这个。根本没有方法可以在不让每个访问helper对象的线程执行同步的情况下实现双重检测锁。
+
+第一个不起作用的原因
+
+最明显的不起作用的原因是初始化Helper对象的写操作和helper的成员的写操作可以是不按顺序执行或者说认识的。
+因此，当一个线程中调用了getHelper()函数，可能会发现指向helper对象的是一个非NULL引用但是helper对象的成员还是默认值而不是构造函数设置的值。
+
+如果编译器把调用内联到构造函数中，那么初始化Helper对象的写操作和helper的成员的写操作可以随意地打乱次序，如果编译器可以保证编译器不会
+抛出异常或者执行同步操作的话。
+
+即使编译器不打乱这些写操作的顺序，在多处理器的系统中，还是可能有处理器或者内存系统乱序这些写操作，比如运行在另一个处理器的线程。
+
+Doug Lea 有一篇更详细描述这个问题的文章：http://gee.cs.oswego.edu/dl/cpj/jmm.html
+
+一个用来演示它不起作用的测试用例
+
+Paul Jakubik 想出一个例子，使用双重检测锁但不能正确工作的，如下
+http://www.cs.umd.edu/~pugh/java/memoryModel/DoubleCheckTest.java
+
+
+当运行在Symantec JIT上时，它不起作用。需要特别指出的是，Symantec JIT会把这一行java代码singletons[i].reference = new Singleton();
+编译为如下的字节码(Symantec JIT使用基于句柄的对象分配系统).：
+
+0206106A   mov         eax,0F97E78h
+0206106F   call        01F6B210                  ; allocate space for
+                                                 ; Singleton, return result in eax
+02061074   mov         dword ptr [ebp],eax       ; EBP is &singletons[i].reference 
+                                                ; store the unconstructed object here.
+02061077   mov         ecx,dword ptr [eax]       ; dereference the handle to
+                                                 ; get the raw pointer
+02061079   mov         dword ptr [ecx],100h      ; Next 4 lines are
+0206107F   mov         dword ptr [ecx+4],200h    ; Singleton's inlined constructor
+02061086   mov         dword ptr [ecx+8],400h
+0206108D   mov         dword ptr [ecx+0Ch],0F84030h
+
+从上面的代码可以看到，赋值给singletons[i].reference是在单例的构造函数之前执行的，这对于现有的java 内存模型来说是完全合法的
+说明：其他线程可能发现helper已经不是null，直接使用其实还没初始化完成的helper
+
+一个不起作用的修正
+基于上述的解释，不少人提出如下的代码：
+
+// (Still) Broken multithreaded version
+// "Double-Checked Locking" idiom
+class Foo { 
+  private Helper helper = null;
+  public Helper getHelper() {
+    if (helper == null) {
+      Helper h;
+      synchronized(this) {
+        h = helper;
+        if (h == null) 
+            synchronized (this) {
+              h = new Helper();
+            } // release inner synchronization lock
+        helper = h;
+        } 
+      }    
+    return helper;
+    }
+  // other functions and members...
+  }
+上面的代码把Helper对象的构造放到一个内部的同步块中。
+直觉的想法是在同步锁释放的地方应该有一个内存屏障，从而阻止对象初始化和对象成员赋值的乱序。
+This code puts construction of the Helper object inside an inner synchronized block.
+The intuitive idea here is that there should be a memory barrier at the point where synchronization is released, 
+and that should prevent the reordering of the initialization of the Helper object and the assignment to the field helper.
+不幸的是，这种直觉完全错误。。。同步的规则不是这样起作用的。
+受监督的退出的规则是这样的：发生在受监督的退出之前的动作必须在监督释放之前执行，但是并没有规则说在受监督退出之后的动作不可以在监督
+释放之前就执行。编译器把赋值语句helper = h;移动到上面的同步代码块中是非常说得通而且合法的。这样又回到了上面的情况
+
+很多处理器提供了指南说明这种单向的内存屏障，改变语义从而要求释放锁满足全内存屏障可能会导致性能惩罚。
+
+更多不起作用的修正
+
+There is something you can do to force the writer to perform a full bidirectional memory barrier. 
+This is gross, inefficient, and is almost guaranteed not to work once the Java Memory Model is revised. 
+Do not use this. In the interests of science, I've put a description of this technique on a separate page. Do not use it.
+
+However, even with a full memory barrier being performed by the thread that initializes the helper object, it still doesn't work.
+
+The problem is that on some systems, the thread which sees a non-null value for the helper field also needs to perform memory barriers.
+
+Why? Because processors have their own locally cached copies of memory. On some processors, unless the processor performs a cache coherence instruction (e.g., a memory barrier), reads can be performed out of stale locally cached copies, even if other processors used memory barriers to force their writes into global memory.
+
+I've created a separate web page with a discussion of how this can actually happen on an Alpha processor.
+
+Is it worth the trouble?
+
+For most applications, the cost of simply making the getHelper() method synchronized is not high. You should only consider this kind of detailed optimizations if you know that it is causing a substantial overhead for an application.
+
+Very often, more high level cleverness, such as using the builtin mergesort rather than handling exchange sort (see the SPECJVM DB benchmark) will have much more impact.
+
+Making it work for static singletons
+
+If the singleton you are creating is static (i.e., there will only be one Helper created), as opposed to a property of another object (e.g., there will be one Helper for each Foo object, there is a simple and elegant solution.
+
+Just define the singleton as a static field in a separate class. The semantics of Java guarantee that the field will not be initialized until the field is referenced, and that any thread which accesses the field will see all of the writes resulting from initializing that field.
+
+class HelperSingleton {
+  static Helper singleton = new Helper();
+  }
+It will work for 32-bit primitive values
+
+Although the double-checked locking idiom cannot be used for references to objects, it can work for 32-bit primitive values (e.g., int's or float's). Note that it does not work for long's or double's, since unsynchronized reads/writes of 64-bit primitives are not guaranteed to be atomic.
+
+// Correct Double-Checked Locking for 32-bit primitives
+class Foo { 
+  private int cachedHashCode = 0;
+  public int hashCode() {
+    int h = cachedHashCode;
+    if (h == 0) 
+    synchronized(this) {
+      if (cachedHashCode != 0) return cachedHashCode;
+      h = computeHashCode();
+      cachedHashCode = h;
+      }
+    return h;
+    }
+  // other functions and members...
+  }
+In fact, assuming that the computeHashCode function always returned the same result and had no side effects (i.e., idempotent), you could even get rid of all of the synchronization.
+
+// Lazy initialization 32-bit primitives
+// Thread-safe if computeHashCode is idempotent
+class Foo { 
+  private int cachedHashCode = 0;
+  public int hashCode() {
+    int h = cachedHashCode;
+    if (h == 0) {
+      h = computeHashCode();
+      cachedHashCode = h;
+      }
+    return h;
+    }
+  // other functions and members...
+  }
+Making it work with explicit memory barriers
+
+It is possible to make the double checked locking pattern work if you have explicit memory barrier instructions. For example, if you are programming in C++, you can use the code from Doug Schmidt et al.'s book:
+
+// C++ implementation with explicit memory barriers
+// Should work on any platform, including DEC Alphas
+// From "Patterns for Concurrent and Distributed Objects",
+// by Doug Schmidt
+template <class TYPE, class LOCK> TYPE *
+Singleton<TYPE, LOCK>::instance (void) {
+    // First check
+    TYPE* tmp = instance_;
+    // Insert the CPU-specific memory barrier instruction
+    // to synchronize the cache lines on multi-processor.
+    asm ("memoryBarrier");
+    if (tmp == 0) {
+        // Ensure serialization (guard
+        // constructor acquires lock_).
+        Guard<LOCK> guard (lock_);
+        // Double check.
+        tmp = instance_;
+        if (tmp == 0) {
+                tmp = new TYPE;
+                // Insert the CPU-specific memory barrier instruction
+                // to synchronize the cache lines on multi-processor.
+                asm ("memoryBarrier");
+                instance_ = tmp;
+        }
+    return tmp;
+    }
+Fixing Double-Checked Locking using Thread Local Storage
+
+Alexander Terekhov (TEREKHOV@de.ibm.com) came up clever suggestion for implementing double checked locking using thread local storage. Each thread keeps a thread local flag to determine whether that thread has done the required synchronization.
+  class Foo {
+	 /** If perThreadInstance.get() returns a non-null value, this thread
+		has done synchronization needed to see initialization
+		of helper */
+         private final ThreadLocal perThreadInstance = new ThreadLocal();
+         private Helper helper = null;
+         public Helper getHelper() {
+             if (perThreadInstance.get() == null) createHelper();
+             return helper;
+         }
+         private final void createHelper() {
+             synchronized(this) {
+                 if (helper == null)
+                     helper = new Helper();
+             }
+	     // Any non-null value would do as the argument here
+             perThreadInstance.set(perThreadInstance);
+         }
+	}
+The performance of this technique depends quite a bit on which JDK implementation you have. In Sun's 1.2 implementation, ThreadLocal's were very slow. They are significantly faster in 1.3, and are expected to be faster still in 1.4. Doug Lea analyzed the performance of some techniques for implementing lazy initialization.
+
+Under the new Java Memory Model
+
+As of JDK5, there is a new Java Memory Model and Thread specification.
+
+Fixing Double-Checked Locking using Volatile
+
+JDK5 and later extends the semantics for volatile so that the system will not allow a write of a volatile to be reordered with respect to any previous read or write, and a read of a volatile cannot be reordered with respect to any following read or write. See this entry in Jeremy Manson's blog for more details.
+
+With this change, the Double-Checked Locking idiom can be made to work by declaring the helper field to be volatile. This does not work under JDK4 and earlier.
+
+// Works with acquire/release semantics for volatile
+// Broken under current semantics for volatile
+  class Foo {
+        private volatile Helper helper = null;
+        public Helper getHelper() {
+            if (helper == null) {
+                synchronized(this) {
+                    if (helper == null)
+                        helper = new Helper();
+                }
+            }
+            return helper;
+        }
+    }
+Double-Checked Locking Immutable Objects
+
+If Helper is an immutable object, such that all of the fields of Helper are final, then double-checked locking will work without having to use volatile fields. The idea is that a reference to an immutable object (such as a String or an Integer) should behave in much the same way as an int or float; reading and writing references to immutable objects are atomic.
+
+Descriptions of double-check idiom
+
+Reality Check, Douglas C. Schmidt, C++ Report, SIGS, Vol. 8, No. 3, March 1996.
+Double-Checked Locking: An Optimization Pattern for Efficiently Initializing and Accessing Thread-safe Objects, Douglas Schmidt and Tim Harrison. 3rd annual Pattern Languages of Program Design conference, 1996
+Lazy instantiation, Philip Bishop and Nigel Warren, JavaWorld Magazine
+Programming Java threads in the real world, Part 7, Allen Holub, Javaworld Magazine, April 1999.
+Java 2 Performance and Idiom Guide, Craig Larman and Rhett Guthrie, p100.
+Java in Practice: Design Styles and Idioms for Effective Java, Nigel Warren and Philip Bishop, p142.
+Rule 99, The Elements of Java Style, Allan Vermeulen, Scott Ambler, Greg Bumgardner, Eldon Metz, Trvor Misfeldt, Jim Shur, Patrick Thompson, SIGS Reference library
+Global Variables in Java with the Singleton Pattern, Wiebe de Jong, Gamelan
