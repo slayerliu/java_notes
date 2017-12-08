@@ -120,9 +120,7 @@ class Foo {
   }
 上面的代码把Helper对象的构造放到一个内部的同步块中。
 直觉的想法是在同步锁释放的地方应该有一个内存屏障，从而阻止对象初始化和对象成员赋值的乱序。
-This code puts construction of the Helper object inside an inner synchronized block.
-The intuitive idea here is that there should be a memory barrier at the point where synchronization is released, 
-and that should prevent the reordering of the initialization of the Helper object and the assignment to the field helper.
+
 不幸的是，这种直觉完全错误。。。同步的规则不是这样起作用的。
 受监督的退出的规则是这样的：发生在受监督的退出之前的动作必须在监督释放之前执行，但是并没有规则说在受监督退出之后的动作不可以在监督
 释放之前就执行。编译器把赋值语句helper = h;移动到上面的同步代码块中是非常说得通而且合法的。这样又回到了上面的情况
@@ -131,6 +129,7 @@ and that should prevent the reordering of the initialization of the Helper objec
 
 更多不起作用的修正
 
+可以用一些方法迫使写操作执行双向的内存屏障。
 There is something you can do to force the writer to perform a full bidirectional memory barrier. 
 This is gross, inefficient, and is almost guaranteed not to work once the Java Memory Model is revised. 
 Do not use this. In the interests of science, I've put a description of this technique on a separate page. Do not use it.
