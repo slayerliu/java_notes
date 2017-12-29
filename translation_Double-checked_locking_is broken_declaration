@@ -131,14 +131,21 @@ class Foo {
 
 可以用一些方法迫使写操作执行双向的内存屏障。
 There is something you can do to force the writer to perform a full bidirectional memory barrier. 
+但是这样的方法既不优雅，效率也低。而且几乎可以确定的是当java内存模型改变了之后，这些方法就不再生效了。
 This is gross, inefficient, and is almost guaranteed not to work once the Java Memory Model is revised. 
+再强调一次，不要用这样方法。为了science的需要，我在另外单独的页面放上去了这种技术。但是再强调一次，不要用这样的方法。
 Do not use this. In the interests of science, I've put a description of this technique on a separate page. Do not use it.
-
+但是，即使初始化helper对象的那个线程即使使用全向内存屏障，还是不起作用。
 However, even with a full memory barrier being performed by the thread that initializes the helper object, it still doesn't work.
-
+问题在于，在某些系统中，线程去看helper对象的非null值也需要执行内存屏障。
 The problem is that on some systems, the thread which sees a non-null value for the helper field also needs to perform memory barriers.
+为什么呢？因为处理器中有他们自己本地的缓存了的内存副本。在某些处理器中，除非处理器执行内存一致性指令，否则，即使其他的处理器
+使用内存屏障迫使写操作到global内存中，读取还是可以在陈旧的本地缓存备份上执行。
 
-Why? Because processors have their own locally cached copies of memory. On some processors, unless the processor performs a cache coherence instruction (e.g., a memory barrier), reads can be performed out of stale locally cached copies, even if other processors used memory barriers to force their writes into global memory.
+Why? Because processors have their own locally cached copies of memory. 
+On some processors, unless the processor performs a cache coherence instruction (e.g., a memory barrier), 
+reads can be performed out of stale locally cached copies, 
+even if other processors used memory barriers to force their writes into global memory.
 
 I've created a separate web page with a discussion of how this can actually happen on an Alpha processor.
 
